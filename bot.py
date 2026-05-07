@@ -82,8 +82,6 @@ def make_token(tg_id: int) -> str:
     return f"{_to_base36(tg_id)}_{_hash_to_b36_6(h6)}"
 
 async def check_subscription(user_id: int) -> bool:
-    if not CHECK_SUB:
-        return True
     try:
         member = await bot.get_chat_member(TG_CHANNEL, user_id)
         return member.status not in ("left", "kicked")
@@ -139,8 +137,7 @@ async def cb_menu_help(call: CallbackQuery):
         "✅ После верификации вы получите:\n"
         "• Титул <b>«Гражданин»</b>\n"
         "• <b>+10000 Р</b> на баланс\n"
-        "• <b>+10 Trust Score</b>\n\n"
-        "⚠️ Код действителен до конца суток (UTC).",
+        "• <b>+25 Trust Score</b>",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="◀️ Назад", callback_data="menu:back"),
         ]]),
@@ -177,6 +174,7 @@ async def cb_menu_verify(call: CallbackQuery):
     if not await check_subscription(call.from_user.id):
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📢 Подписаться", url=f"https://t.me/{TG_CHANNEL.lstrip('@')}")],
+            [InlineKeyboardButton(text="🔄 Я подписался", callback_data="menu:verify")],
             [InlineKeyboardButton(text="◀️ Назад", callback_data="menu:back")],
         ])
         await call.message.edit_text(
@@ -193,7 +191,6 @@ async def cb_menu_verify(call: CallbackQuery):
         f"<code>{token}</code>\n\n"
         f"Введите в игре:\n"
         f"<code>.econ verify {token}</code>\n\n"
-        "⚠️ Код действителен до конца суток (UTC).\n"
         "Зайдите на сервер и введите команду выше.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="◀️ Назад", callback_data="menu:back"),
@@ -215,8 +212,7 @@ async def cmd_help(msg: Message):
         "✅ После верификации вы получите:\n"
         "• Титул <b>«Гражданин»</b>\n"
         "• <b>+10000 Р</b> на баланс\n"
-        "• <b>+10 Trust Score</b>\n\n"
-        "⚠️ Код действителен до конца суток (UTC).",
+        "• <b>+25 Trust Score</b>",
         parse_mode="HTML"
     )
 
