@@ -23,6 +23,12 @@ from admin_panel import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+# ─── FSM States ──────────────────────────────────────────────────────────────
+
+class VerifyState(StatesGroup):
+    waiting_code = State()
+
 BOT_TOKEN       = os.getenv("BOT_TOKEN")
 PTERODACTYL_URL = os.getenv("PTERODACTYL_URL", "https://my.aurorix.net")
 PTERODACTYL_KEY = os.getenv("PTERODACTYL_KEY")
