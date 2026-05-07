@@ -9,8 +9,8 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from db import Database
-from moderation import is_admin, mod_action, parse_mod_args
-from addon_bridge import AddonBridge
+from moderation import is_admin, mod_action, parse_mod_args, send_server_command
+from ptero_ws import PteroConsoleWatcher
 from aiogram.fsm.state import State, StatesGroup
 from admin_panel import (
     AdminState, admin_main_kb, admin_main_text, back_kb,
@@ -21,10 +21,41 @@ from admin_panel import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ─── ГЕНЕРАЦИЯ ТОКЕНА (офлайн, без сервера) ───────────────────────────────────
+# Должен совпадать с SECRET в tg_verify.js
+_SECRET = "ЗАМЕНИ_МЕНЯ"
+_B36 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+def _djb2(s: str) -> int:
+    h = 0
+    for c in s:
+        h = ((h << 5) + h + ord(c)) & 0xFFFFFFFF
+    return h
+
+def _to_b36(n: int) -> str:
+    if n == 0: return "0"
+    s = ""
+    while n:
+        s = _B36[n % 36] + s
+        n //= 36
+    return s
+
+def make_token(tg_id: int) -> str:
+    import time
+    day = int(time.time()) // 86400
+    h6  = _djb2(f"{_SECRET}{tg_id}{day}") % (36 ** 6)
+    hash_part = ""
+    tmp = h6
+    for _ in range(6):
+        hash_part = _B36[tmp % 36] + hash_part
+        tmp //= 36
+    id_part = _to_b36(tg_id)
+    return f"{id_part}_{hash_part}"
+
 BOT_TOKEN       = os.getenv("BOT_TOKEN")
-
-
-
+PTERODACTYL_URL = os.getenv("PTERODACTYL_URL", "https://my.aurorix.net")
+PTERODACTYL_KEY = os.getenv("PTERODACTYL_KEY")
+SERVER_ID       = os.getenv("SERVER_ID", "6daf8160-16ab-4a5b-ac25-3e35cb75a3d4")
 TG_CHANNEL      = os.getenv("TG_CHANNEL", "@zerkavich")
 CHECK_SUB       = os.getenv("CHECK_SUBSCRIPTION", "false").lower() == "true"
 APPEAL_URL      = os.getenv("APPEAL_URL", "@zerkavich")
@@ -33,7 +64,14 @@ bot = Bot(token=BOT_TOKEN)
 dp  = Dispatcher(storage=MemoryStorage())
 db  = Database("data.json")
 
-bridge = AddonBridge(db=db)
+watcher = PteroConsoleWatcher(
+    panel_url   = PTERODACTYL_URL,
+    api_key     = PTERODACTYL_KEY or '',
+    server_id   = SERVER_ID,
+    output_file = 'pfids.json',
+    appeal_url  = APPEAL_URL,
+    db          = db,
+)
 
 
 
@@ -62,9 +100,9 @@ def main_menu_kb(is_verified: bool = False) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="❓ Помощь",     callback_data="menu:help")],
         ])
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Верифицироваться", callback_data="menu:verify")],
-        [InlineKeyboardButton(text="📋 Мой статус",       callback_data="menu:status")],
-        [InlineKeyboardButton(text="❓ Как это работает", callback_data="menu:help")],
+        [InlineKeyboardButton(text="🔑 Получить токен",     callback_data="menu:token")],
+        [InlineKeyboardButton(text="📋 Мой статус",         callback_data="menu:status")],
+        [InlineKeyboardButton(text="❓ Как это работает",   callback_data="menu:help")],
     ])
 
 
@@ -156,9 +194,9 @@ async def cb_menu_back(call: CallbackQuery):
     await call.answer()
 
 
-@dp.callback_query(F.data == "menu:verify")
-async def cb_menu_verify(call: CallbackQuery, state: FSMContext):
-    uid = str(call.from_user.id)
+@dp.callback_query(F.data == "menu:token")
+async def cb_menu_token(call: CallbackQuery):
+    uid  = str(call.from_user.id)
     data = db.get_user(uid)
     if data and data.get("verified"):
         await call.answer("✅ Вы уже верифицированы!", show_alert=True)
@@ -177,14 +215,15 @@ async def cb_menu_verify(call: CallbackQuery, state: FSMContext):
         await call.answer()
         return
 
-    await state.set_state(VerifyState.waiting_code)
+    token = make_token(call.from_user.id)
     await call.message.edit_text(
-        "🔑 <b>Введите код верификации</b>\n\n"
-        "Получите код в игре командой <code>.econ verify</code>\n"
-        "и отправьте его сюда одним сообщением.\n\n"
-        "⚠️ Код действителен 30 минут.",
+        f"🔑 <b>Ваш токен верификации:</b>\n\n"
+        f"<code>{token}</code>\n\n"
+        f"В игре введите в меню верификации\nили командой:\n"
+        f"<code>.verify {token}</code>\n\n"
+        f"⚠️ Токен действителен <b>48 часов</b> и одноразовый.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="❌ Отмена", callback_data="menu:back"),
+            InlineKeyboardButton(text="◀️ Назад", callback_data="menu:back"),
         ]]),
         parse_mode="HTML"
     )
@@ -237,9 +276,11 @@ async def cmd_status(msg: Message):
 async def do_verify(msg: Message, code: str, state: FSMContext | None = None):
     """
     Флоу верификации:
-      1. Бот ставит запрос в очередь через bridge.enqueue_verify
-      2. Аддон забирает код через GET /api/pending, проверяет его
-      3. Аддон POST /api/verify_result → bridge записывает mc_name или откатывает
+      1. Бот шлёт scriptevent econ:tg_verify → аддон проверяет, существует ли код
+      2. Аддон шлёт scriptevent econ:tg_verify_result → ptero_ws ловит в консоли
+         ok=True  → ptero_ws записывает mc_name и помечает код использованным
+         ok=False → ptero_ws откатывает mark_verified через unlink_tg
+      Таким образом привязка к несуществующему коду автоматически откатывается.
     """
     uid      = str(msg.from_user.id)
     username = msg.from_user.username or msg.from_user.first_name
@@ -266,26 +307,47 @@ async def do_verify(msg: Message, code: str, state: FSMContext | None = None):
         return
 
     tg_name = f"@{username}" if msg.from_user.username else username
+    command = f'scriptevent econ:tg_verify {{"code":"{code}","tg_username":"{tg_name}","tg_id":"{uid}"}}'
 
-    # Сохраняем pending ДО постановки в очередь
-    db.save_pending(uid, code, tg_name)
+    # Сохраняем pending ДО отправки команды — иначе race condition:
+    # аддон может прислать warn раньше чем save_pending успеет выполниться,
+    # тогда find_pending_by_code вернёт None и уведомление об ошибке не уйдёт.
+    db.save_pending(uid, code, tg_name)  # сохраняет verified=False
 
-    bridge.enqueue_verify(uid, code, tg_name)
+    wait_msg = await msg.answer("⏳ Проверяю код на сервере...")
+    ok, err = await send_server_command(command)
 
-    if state:
-        await state.clear()
-    await msg.answer(
-        "⏳ <b>Запрос отправлен, ожидаем подтверждения сервера.</b>\n\n"
-        f"🔑 Код: <code>{code}</code>\n\n"
-        "Если код верный, в игре вы получите:\n"
-        "• Титул <b>«Гражданин»</b>\n"
-        "• <b>+200 T</b> на баланс\n"
-        "• <b>+10 Trust Score</b>\n\n"
-        "⚠️ Верификация будет подтверждена только после ответа сервера.\n"
-        "Если код неверный — привязка не произойдёт.",
-        reply_markup=main_menu_kb(is_verified=False),
-        parse_mode="HTML"
-    )
+    if ok:
+        # HTTP 204 — команда дошла до сервера (но код мог не существовать в аддоне).
+        # Если аддон ответит ok=True  → ptero_ws запишет mc_name и выставит verified=True.
+        # Если аддон ответит ok=False → ptero_ws откатит запись через unlink_tg.
+        if state:
+            await state.clear()
+        await wait_msg.delete()
+        await msg.answer(
+            "⏳ <b>Запрос отправлен, ожидаем подтверждения сервера.</b>\n\n"
+            f"🔑 Код: <code>{code}</code>\n\n"
+            "Если код верный, в игре вы получите:\n"
+            "• Титул <b>«Гражданин»</b>\n"
+            "• <b>+200 T</b> на баланс\n"
+            "• <b>+10 Trust Score</b>\n\n"
+            "⚠️ Верификация будет подтверждена только после ответа сервера.\n"
+            "Если код неверный — привязка не произойдёт.",
+            reply_markup=main_menu_kb(is_verified=False),  # не показываем как верифицированного
+            parse_mode="HTML"
+        )
+    else:
+        # Сервер недоступен — откатываем pending-запись которую сохранили выше
+        db.unlink_tg(uid)
+        await wait_msg.delete()
+        await msg.answer(
+            f"❌ <b>Сервер недоступен.</b>\n\n"
+            f"Попробуйте позже или обратитесь в {APPEAL_URL}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="menu:verify"),
+            ]]) if state else None,
+            parse_mode="HTML"
+        )
 
 
 # ─── /verify КОД ─────────────────────────────────────────────────────────────
@@ -389,7 +451,7 @@ async def process_ban_input(msg: Message, state: FSMContext):
         return
 
     wait = await msg.answer("⏳ Баню...")
-    ok, err = await mod_action("ban", db=db, bridge=bridge,
+    ok, err = await mod_action("ban", db=db, watcher=watcher,
         name=args.get("name"),
         pfid=args.get("pfid"),
         xuid=args.get("xuid"),
@@ -407,7 +469,7 @@ async def process_ban_input(msg: Message, state: FSMContext):
         _xuid = args.get("xuid")
         _name = args.get("name")
         if _name and watcher and not _pfid:
-            _pd = bridge.get_player(_name)
+            _pd = watcher.get_player(_name)
             if _pd:
                 _pfid = _pfid or _pd.get("pfid")
                 _xuid = _xuid or _pd.get("xuid")
@@ -545,7 +607,7 @@ async def cb_unban_do(call: CallbackQuery):
 
     ok, err = await mod_action(
         "unban",
-        bridge=bridge,
+        watcher=watcher,
         name=target,
         pfid=pfid,
         xuid=xuid,
@@ -684,7 +746,7 @@ async def process_search_mc(msg: Message, state: FSMContext):
 
     query = (msg.text or "").strip()
     wait = await msg.answer("⏳ Ищу игрока...")
-    results = bridge.search_players(query)
+    results = watcher.search_players(query)
     await wait.delete()
 
     if not results:
@@ -935,7 +997,7 @@ async def cmd_ban(msg: Message):
         return
     args = parse_mod_args(parts[1])
     wait = await msg.answer("⏳ Бан...")
-    ok, err = await mod_action("ban", db=db, bridge=bridge,
+    ok, err = await mod_action("ban", db=db, watcher=watcher,
         name=args.get("name"),
         pfid=args.get("pfid"),
         xuid=args.get("xuid"),
@@ -949,7 +1011,7 @@ async def cmd_ban(msg: Message):
         _xuid2 = args.get("xuid")
         _name2 = args.get("name")
         if _name2 and watcher and not _pfid2:
-            _pd2 = bridge.get_player(_name2)
+            _pd2 = watcher.get_player(_name2)
             if _pd2:
                 _pfid2 = _pfid2 or _pd2.get("pfid")
                 _xuid2 = _xuid2 or _pd2.get("xuid")
@@ -1069,9 +1131,9 @@ async def unknown(msg: Message, state: FSMContext):
 
 async def main():
     logger.info("Bot starting...")
-    bridge.set_bot(bot)
-    asyncio.create_task(bridge.run())
-    logger.info("[bot] addon_bridge запущен")
+    watcher.set_bot(bot)   # ← чтобы watcher мог слать уведомления в TG
+    asyncio.create_task(watcher.run())
+    logger.info("[bot] ptero_ws watcher запущен")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
