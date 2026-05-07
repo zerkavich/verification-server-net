@@ -1,4 +1,5 @@
 import os
+import time
 import asyncio
 import logging
 import aiohttp
@@ -21,37 +22,6 @@ from admin_panel import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ─── ГЕНЕРАЦИЯ ТОКЕНА (офлайн, без сервера) ───────────────────────────────────
-# Должен совпадать с SECRET в tg_verify.js
-_SECRET = "ЗАМЕНИ_МЕНЯ"
-_B36 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-
-def _djb2(s: str) -> int:
-    h = 0
-    for c in s:
-        h = ((h << 5) + h + ord(c)) & 0xFFFFFFFF
-    return h
-
-def _to_b36(n: int) -> str:
-    if n == 0: return "0"
-    s = ""
-    while n:
-        s = _B36[n % 36] + s
-        n //= 36
-    return s
-
-def make_token(tg_id: int) -> str:
-    import time
-    day = int(time.time()) // 86400
-    h6  = _djb2(f"{_SECRET}{tg_id}{day}") % (36 ** 6)
-    hash_part = ""
-    tmp = h6
-    for _ in range(6):
-        hash_part = _B36[tmp % 36] + hash_part
-        tmp //= 36
-    id_part = _to_b36(tg_id)
-    return f"{id_part}_{hash_part}"
-
 BOT_TOKEN       = os.getenv("BOT_TOKEN")
 PTERODACTYL_URL = os.getenv("PTERODACTYL_URL", "https://my.aurorix.net")
 PTERODACTYL_KEY = os.getenv("PTERODACTYL_KEY")
@@ -59,6 +29,9 @@ SERVER_ID       = os.getenv("SERVER_ID", "6daf8160-16ab-4a5b-ac25-3e35cb75a3d4")
 TG_CHANNEL      = os.getenv("TG_CHANNEL", "@zerkavich")
 CHECK_SUB       = os.getenv("CHECK_SUBSCRIPTION", "false").lower() == "true"
 APPEAL_URL      = os.getenv("APPEAL_URL", "@zerkavich")
+
+# !!! ОДИНАКОВЫЙ СЕКРЕТ В БОТЕ И В АДДОНЕ (tg_verify.js) !!!
+SECRET          = os.getenv("VERIFY_SECRET", "ЗАМЕНИ_МЕНЯ")
 
 bot = Bot(token=BOT_TOKEN)
 dp  = Dispatcher(storage=MemoryStorage())
@@ -73,13 +46,37 @@ watcher = PteroConsoleWatcher(
     db          = db,
 )
 
+# ─── Генерация токена (зеркало алгоритма из tg_verify.js) ────────────────────
 
+_B36 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'
 
-# ─── FSM состояние для ввода кода верификации ─────────────────────────────────
+def _to_base36(n: int) -> str:
+    if n == 0:
+        return '0'
+    s = ''
+    while n > 0:
+        s = _B36[n % 36] + s
+        n //= 36
+    return s
 
-class VerifyState(StatesGroup):
-    waiting_code = State()
+def _djb2hash(raw: str) -> int:
+    h = 0
+    for c in raw:
+        h = ((h << 5) + h + ord(c)) & 0xFFFFFFFF
+    return h % (36 ** 6)
 
+def _hash_to_b36_6(h: int) -> str:
+    s = ''
+    for _ in range(6):
+        s = _B36[h % 36] + s
+        h //= 36
+    return s
+
+def make_token(tg_id: int) -> str:
+    day = int(time.time()) // 86400
+    raw = f"{SECRET}{tg_id}{day}"
+    h6  = _djb2hash(raw)
+    return f"{_to_base36(tg_id)}_{_hash_to_b36_6(h6)}"
 
 async def check_subscription(user_id: int) -> bool:
     if not CHECK_SUB:
@@ -100,9 +97,9 @@ def main_menu_kb(is_verified: bool = False) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="❓ Помощь",     callback_data="menu:help")],
         ])
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔑 Получить токен",     callback_data="menu:token")],
-        [InlineKeyboardButton(text="📋 Мой статус",         callback_data="menu:status")],
-        [InlineKeyboardButton(text="❓ Как это работает",   callback_data="menu:help")],
+        [InlineKeyboardButton(text="✅ Верифицироваться", callback_data="menu:verify")],
+        [InlineKeyboardButton(text="📋 Мой статус",       callback_data="menu:status")],
+        [InlineKeyboardButton(text="❓ Как это работает", callback_data="menu:help")],
     ])
 
 
@@ -194,9 +191,9 @@ async def cb_menu_back(call: CallbackQuery):
     await call.answer()
 
 
-@dp.callback_query(F.data == "menu:token")
-async def cb_menu_token(call: CallbackQuery):
-    uid  = str(call.from_user.id)
+@dp.callback_query(F.data == "menu:verify")
+async def cb_menu_verify(call: CallbackQuery, state: FSMContext):
+    uid = str(call.from_user.id)
     data = db.get_user(uid)
     if data and data.get("verified"):
         await call.answer("✅ Вы уже верифицированы!", show_alert=True)
@@ -215,15 +212,14 @@ async def cb_menu_token(call: CallbackQuery):
         await call.answer()
         return
 
-    token = make_token(call.from_user.id)
+    await state.set_state(VerifyState.waiting_code)
     await call.message.edit_text(
-        f"🔑 <b>Ваш токен верификации:</b>\n\n"
-        f"<code>{token}</code>\n\n"
-        f"В игре введите в меню верификации\nили командой:\n"
-        f"<code>.verify {token}</code>\n\n"
-        f"⚠️ Токен действителен <b>48 часов</b> и одноразовый.",
+        "🔑 <b>Введите код верификации</b>\n\n"
+        "Получите код в игре командой <code>.econ verify</code>\n"
+        "и отправьте его сюда одним сообщением.\n\n"
+        "⚠️ Код действителен 30 минут.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="◀️ Назад", callback_data="menu:back"),
+            InlineKeyboardButton(text="❌ Отмена", callback_data="menu:back"),
         ]]),
         parse_mode="HTML"
     )
