@@ -10,8 +10,9 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from db import Database
-from moderation import is_admin, mod_action, parse_mod_args, send_server_command
+from moderation import is_admin, mod_action, parse_mod_args
 from ptero_ws import PteroConsoleWatcher
+from addon_bridge import AddonBridge
 from aiogram.fsm.state import State, StatesGroup
 from admin_panel import (
     AdminState, admin_main_kb, admin_main_text, back_kb,
@@ -36,6 +37,8 @@ SECRET          = os.getenv("VERIFY_SECRET", "ЗАМЕНИ_МЕНЯ")
 bot = Bot(token=BOT_TOKEN)
 dp  = Dispatcher(storage=MemoryStorage())
 db  = Database("data.json")
+
+bridge = AddonBridge(db=db, bot=bot)
 
 watcher = PteroConsoleWatcher(
     panel_url   = PTERODACTYL_URL,
@@ -303,47 +306,28 @@ async def do_verify(msg: Message, code: str, state: FSMContext | None = None):
         return
 
     tg_name = f"@{username}" if msg.from_user.username else username
-    command = f'scriptevent econ:tg_verify {{"code":"{code}","tg_username":"{tg_name}","tg_id":"{uid}"}}'
 
-    # Сохраняем pending ДО отправки команды — иначе race condition:
-    # аддон может прислать warn раньше чем save_pending успеет выполниться,
-    # тогда find_pending_by_code вернёт None и уведомление об ошибке не уйдёт.
+    # Сохраняем pending ДО постановки в очередь — защита от race condition.
     db.save_pending(uid, code, tg_name)  # сохраняет verified=False
 
-    wait_msg = await msg.answer("⏳ Проверяю код на сервере...")
-    ok, err = await send_server_command(command)
+    # Отправляем через AddonBridge (без Pterodactyl).
+    # Аддон заберёт через GET /api/pending и ответит POST /api/verify_result.
+    bridge.enqueue_verify(tg_id=uid, code=code, tg_username=tg_name)
 
-    if ok:
-        # HTTP 204 — команда дошла до сервера (но код мог не существовать в аддоне).
-        # Если аддон ответит ok=True  → ptero_ws запишет mc_name и выставит verified=True.
-        # Если аддон ответит ok=False → ptero_ws откатит запись через unlink_tg.
-        if state:
-            await state.clear()
-        await wait_msg.delete()
-        await msg.answer(
-            "⏳ <b>Запрос отправлен, ожидаем подтверждения сервера.</b>\n\n"
-            f"🔑 Код: <code>{code}</code>\n\n"
-            "Если код верный, в игре вы получите:\n"
-            "• Титул <b>«Гражданин»</b>\n"
-            "• <b>+200 T</b> на баланс\n"
-            "• <b>+10 Trust Score</b>\n\n"
-            "⚠️ Верификация будет подтверждена только после ответа сервера.\n"
-            "Если код неверный — привязка не произойдёт.",
-            reply_markup=main_menu_kb(is_verified=False),  # не показываем как верифицированного
-            parse_mode="HTML"
-        )
-    else:
-        # Сервер недоступен — откатываем pending-запись которую сохранили выше
-        db.unlink_tg(uid)
-        await wait_msg.delete()
-        await msg.answer(
-            f"❌ <b>Сервер недоступен.</b>\n\n"
-            f"Попробуйте позже или обратитесь в {APPEAL_URL}",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="menu:verify"),
-            ]]) if state else None,
-            parse_mode="HTML"
-        )
+    if state:
+        await state.clear()
+    await msg.answer(
+        "⏳ <b>Запрос отправлен, ожидаем подтверждения сервера.</b>\n\n"
+        f"🔑 Код: <code>{code}</code>\n\n"
+        "Если код верный, в игре вы получите:\n"
+        "• Титул <b>«Гражданин»</b>\n"
+        "• <b>+200 T</b> на баланс\n"
+        "• <b>+10 Trust Score</b>\n\n"
+        "⚠️ Верификация будет подтверждена только после ответа сервера.\n"
+        "Если код неверный — привязка не произойдёт.",
+        reply_markup=main_menu_kb(is_verified=False),
+        parse_mode="HTML"
+    )
 
 
 # ─── /verify КОД ─────────────────────────────────────────────────────────────
@@ -1127,7 +1111,12 @@ async def unknown(msg: Message, state: FSMContext):
 
 async def main():
     logger.info("Bot starting...")
-    watcher.set_bot(bot)   # ← чтобы watcher мог слать уведомления в TG
+    # AddonBridge — HTTP-сервер для связи с аддоном (заменяет ptero_ws + Pterodactyl)
+    bridge.set_db(db)
+    asyncio.create_task(bridge.run())
+    logger.info("[bot] AddonBridge запущен")
+    # ptero_ws watcher оставляем для обратной совместимости (модерация, логи консоли)
+    watcher.set_bot(bot)
     asyncio.create_task(watcher.run())
     logger.info("[bot] ptero_ws watcher запущен")
     await dp.start_polling(bot)
