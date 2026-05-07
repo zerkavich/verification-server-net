@@ -96,12 +96,10 @@ async def check_subscription(user_id: int) -> bool:
 def main_menu_kb(is_verified: bool = False) -> InlineKeyboardMarkup:
     if is_verified:
         return InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📋 Мой статус", callback_data="menu:status")],
-            [InlineKeyboardButton(text="❓ Помощь",     callback_data="menu:help")],
+            [InlineKeyboardButton(text="❓ Помощь", callback_data="menu:help")],
         ])
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Верифицироваться", callback_data="menu:verify")],
-        [InlineKeyboardButton(text="📋 Мой статус",       callback_data="menu:status")],
         [InlineKeyboardButton(text="❓ Как это работает", callback_data="menu:help")],
     ])
 
@@ -150,31 +148,6 @@ async def cb_menu_help(call: CallbackQuery):
     )
     await call.answer()
 
-
-@dp.callback_query(F.data == "menu:status")
-async def cb_menu_status(call: CallbackQuery):
-    uid  = str(call.from_user.id)
-    data = db.get_user(uid)
-    if data and data.get("verified"):
-        mc = data.get("mc_name") or "—"
-        text = (
-            f"✅ <b>Аккаунт верифицирован!</b>\n\n"
-            f"🎮 MC-ник: <code>{mc}</code>\n"
-            f"📅 Дата: {data.get('verified_at', '—')}"
-        )
-    else:
-        text = (
-            "❌ <b>Не верифицирован.</b>\n\n"
-            "Нажмите «Верифицироваться» чтобы привязать аккаунт."
-        )
-    await call.message.edit_text(
-        text,
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="◀️ Назад", callback_data="menu:back"),
-        ]]),
-        parse_mode="HTML"
-    )
-    await call.answer()
 
 
 @dp.callback_query(F.data == "menu:back")
@@ -248,26 +221,6 @@ async def cmd_help(msg: Message):
     )
 
 
-# ─── /status ─────────────────────────────────────────────────────────────────
-
-@dp.message(Command("status"))
-async def cmd_status(msg: Message):
-    uid  = str(msg.from_user.id)
-    data = db.get_user(uid)
-    if data and data.get("verified"):
-        mc = data.get("mc_name") or "—"
-        await msg.answer(
-            f"✅ <b>Аккаунт верифицирован!</b>\n\n"
-            f"🎮 MC-ник: <code>{mc}</code>\n"
-            f"📅 Дата: {data.get('verified_at', '—')}",
-            parse_mode="HTML"
-        )
-    else:
-        await msg.answer(
-            "❌ <b>Не верифицирован.</b>\n\n"
-            "Нажмите «Верифицироваться» в меню, чтобы получить код.",
-            parse_mode="HTML"
-        )
 
 
 
