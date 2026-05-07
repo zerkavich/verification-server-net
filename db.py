@@ -40,6 +40,31 @@ class Database:
         """Устарело — используйте save_pending(). Оставлено для совместимости."""
         self.save_pending(tg_id, code, tg_name)
 
+    def confirm_tg_link(self, tg_id: str, mc_name: str):
+        """
+        Вызывается ptero_ws после того как аддон сам верифицировал токен оффлайн
+        и написал в консоль '[TG Verify] OK tg_id=... mc_name=...'.
+        Создаёт или обновляет запись — verified=True сразу, без pending-флоу.
+        """
+        uid = str(tg_id)
+        user = self._data['users'].get(uid)
+        if user:
+            user['verified']    = True
+            user['mc_name']     = mc_name
+            user['verified_at'] = datetime.now().strftime('%Y-%m-%d %H:%M')
+        else:
+            self._data['users'][uid] = {
+                'verified':    True,
+                'tg_id':       uid,
+                'tg_name':     '',        # неизвестен, аддон не передаёт
+                'mc_name':     mc_name,
+                'verified_at': datetime.now().strftime('%Y-%m-%d %H:%M'),
+            }
+        hist = self._data['users'][uid].setdefault('mc_names_history', [])
+        if mc_name and mc_name not in hist:
+            hist.append(mc_name)
+        self._save()
+
     def confirm_verified(self, tg_id: str, mc_name: str):
         """Вызывается ptero_ws после ok=True от аддона. Выставляет verified=True и mc_name."""
         uid = str(tg_id)
