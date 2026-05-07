@@ -13,7 +13,6 @@ from db import Database
 from moderation import is_admin, mod_action, parse_mod_args
 from ptero_ws import PteroConsoleWatcher
 from addon_bridge import AddonBridge
-from aiogram.fsm.state import State, StatesGroup
 from admin_panel import (
     AdminState, admin_main_kb, admin_main_text, back_kb,
     BAN_HELP, KICK_HELP, MUTE_HELP, SEARCH_HELP, SEARCH_MC_HELP, UNLINK_HELP,
@@ -23,11 +22,6 @@ from admin_panel import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
-# ─── FSM States ──────────────────────────────────────────────────────────────
-
-class VerifyState(StatesGroup):
-    waiting_code = State()
 
 BOT_TOKEN       = os.getenv("BOT_TOKEN")
 PTERODACTYL_URL = os.getenv("PTERODACTYL_URL", "https://my.aurorix.net")
@@ -141,15 +135,14 @@ async def cmd_start(msg: Message):
 async def cb_menu_help(call: CallbackQuery):
     await call.message.edit_text(
         "❓ <b>Как верифицироваться:</b>\n\n"
-        "1️⃣ Зайдите на сервер Minecraft\n"
-        "2️⃣ Введите <code>.econ verify</code>\n"
-        "3️⃣ Скопируйте код из игры\n"
-        "4️⃣ Нажмите «Верифицироваться» и введите код\n\n"
+        "1️⃣ Нажмите «Верифицироваться» — бот выдаст код\n"
+        "2️⃣ Зайдите на сервер Minecraft\n"
+        "3️⃣ Введите <code>.econ verify ВАШ_КОД</code>\n\n"
         "✅ После верификации вы получите:\n"
         "• Титул <b>«Гражданин»</b>\n"
         "• <b>+200 T</b> на баланс\n"
         "• <b>+10 Trust Score</b>\n\n"
-        "⚠️ Код действителен <b>30 минут</b>.",
+        "⚠️ Код действителен до конца суток (UTC).",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="◀️ Назад", callback_data="menu:back"),
         ]]),
@@ -201,7 +194,7 @@ async def cb_menu_back(call: CallbackQuery):
 
 
 @dp.callback_query(F.data == "menu:verify")
-async def cb_menu_verify(call: CallbackQuery, state: FSMContext):
+async def cb_menu_verify(call: CallbackQuery):
     uid = str(call.from_user.id)
     data = db.get_user(uid)
     if data and data.get("verified"):
@@ -221,14 +214,16 @@ async def cb_menu_verify(call: CallbackQuery, state: FSMContext):
         await call.answer()
         return
 
-    await state.set_state(VerifyState.waiting_code)
+    token = make_token(call.from_user.id)
     await call.message.edit_text(
-        "🔑 <b>Введите код верификации</b>\n\n"
-        "Получите код в игре командой <code>.econ verify</code>\n"
-        "и отправьте его сюда одним сообщением.\n\n"
-        "⚠️ Код действителен 30 минут.",
+        "🔑 <b>Ваш код верификации:</b>\n\n"
+        f"<code>{token}</code>\n\n"
+        f"Введите в игре:\n"
+        f"<code>.econ verify {token}</code>\n\n"
+        "⚠️ Код действителен до конца суток (UTC).\n"
+        "Зайдите на сервер и введите команду выше.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="❌ Отмена", callback_data="menu:back"),
+            InlineKeyboardButton(text="◀️ Назад", callback_data="menu:back"),
         ]]),
         parse_mode="HTML"
     )
@@ -241,15 +236,14 @@ async def cb_menu_verify(call: CallbackQuery, state: FSMContext):
 async def cmd_help(msg: Message):
     await msg.answer(
         "❓ <b>Как верифицироваться:</b>\n\n"
-        "1️⃣ Зайдите на сервер Minecraft\n"
-        "2️⃣ Введите <code>.econ verify</code>\n"
-        "3️⃣ Скопируйте код из игры\n"
-        "4️⃣ Нажмите «Верифицироваться» в меню или /verify <code>КОД</code>\n\n"
+        "1️⃣ Нажмите «Верифицироваться» — бот выдаст код\n"
+        "2️⃣ Зайдите на сервер Minecraft\n"
+        "3️⃣ Введите <code>.econ verify ВАШ_КОД</code>\n\n"
         "✅ После верификации вы получите:\n"
         "• Титул <b>«Гражданин»</b>\n"
         "• <b>+200 T</b> на баланс\n"
         "• <b>+10 Trust Score</b>\n\n"
-        "⚠️ Код действителен <b>30 минут</b>.",
+        "⚠️ Код действителен до конца суток (UTC).",
         parse_mode="HTML"
     )
 
@@ -271,98 +265,10 @@ async def cmd_status(msg: Message):
     else:
         await msg.answer(
             "❌ <b>Не верифицирован.</b>\n\n"
-            "Используйте /verify <code>КОД</code> из игры.",
+            "Нажмите «Верифицироваться» в меню, чтобы получить код.",
             parse_mode="HTML"
         )
 
-
-# ─── Общая функция верификации ────────────────────────────────────────────────
-
-async def do_verify(msg: Message, code: str, state: FSMContext | None = None):
-    """
-    Флоу верификации:
-      1. Бот шлёт scriptevent econ:tg_verify → аддон проверяет, существует ли код
-      2. Аддон шлёт scriptevent econ:tg_verify_result → ptero_ws ловит в консоли
-         ok=True  → ptero_ws записывает mc_name и помечает код использованным
-         ok=False → ptero_ws откатывает mark_verified через unlink_tg
-      Таким образом привязка к несуществующему коду автоматически откатывается.
-    """
-    uid      = str(msg.from_user.id)
-    username = msg.from_user.username or msg.from_user.first_name
-
-    data = db.get_user(uid)
-    if data and data.get("verified"):
-        if state:
-            await state.clear()
-        await msg.answer("✅ Вы уже верифицированы!\nПовторная верификация невозможна.")
-        return
-
-    code = code.strip().upper()
-    if len(code) < 5 or len(code) > 20 or not code.isalnum():
-        await msg.answer(
-            "❌ Неверный формат кода.\n\n"
-            "Код должен быть от 5 до 20 символов (буквы и цифры).\n"
-            "Получите код командой <code>.econ verify</code> в игре.",
-            parse_mode="HTML"
-        )
-        return
-
-    if db.is_code_used(code):
-        await msg.answer("❌ Этот код уже был использован.")
-        return
-
-    tg_name = f"@{username}" if msg.from_user.username else username
-
-    # Сохраняем pending ДО постановки в очередь — защита от race condition.
-    db.save_pending(uid, code, tg_name)  # сохраняет verified=False
-
-    # Отправляем через AddonBridge (без Pterodactyl).
-    # Аддон заберёт через GET /api/pending и ответит POST /api/verify_result.
-    bridge.enqueue_verify(tg_id=uid, code=code, tg_username=tg_name)
-
-    if state:
-        await state.clear()
-    await msg.answer(
-        "⏳ <b>Запрос отправлен, ожидаем подтверждения сервера.</b>\n\n"
-        f"🔑 Код: <code>{code}</code>\n\n"
-        "Если код верный, в игре вы получите:\n"
-        "• Титул <b>«Гражданин»</b>\n"
-        "• <b>+200 T</b> на баланс\n"
-        "• <b>+10 Trust Score</b>\n\n"
-        "⚠️ Верификация будет подтверждена только после ответа сервера.\n"
-        "Если код неверный — привязка не произойдёт.",
-        reply_markup=main_menu_kb(is_verified=False),
-        parse_mode="HTML"
-    )
-
-
-# ─── /verify КОД ─────────────────────────────────────────────────────────────
-
-@dp.message(Command("verify"))
-async def cmd_verify(msg: Message):
-    if not await check_subscription(msg.from_user.id):
-        kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="📢 Подписаться", url=f"https://t.me/{TG_CHANNEL.lstrip('@')}")
-        ]])
-        await msg.answer(f"⚠️ Для верификации подпишитесь на {TG_CHANNEL}", reply_markup=kb)
-        return
-
-    parts = msg.text.split(maxsplit=1)
-    if len(parts) < 2 or not parts[1].strip():
-        await msg.answer(
-            "❌ Укажите код из игры.\n\nПример: <code>/verify STEVE123456</code>",
-            parse_mode="HTML"
-        )
-        return
-
-    await do_verify(msg, parts[1].strip())
-
-
-# ─── Обработка кода верификации из меню ──────────────────────────────────────
-
-@dp.message(VerifyState.waiting_code)
-async def handle_verify_code(msg: Message, state: FSMContext):
-    await do_verify(msg, msg.text or "", state)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
