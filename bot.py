@@ -140,7 +140,7 @@ async def cb_menu_help(call: CallbackQuery):
         "3️⃣ Введите <code>.econ verify ВАШ_КОД</code>\n\n"
         "✅ После верификации вы получите:\n"
         "• Титул <b>«Гражданин»</b>\n"
-        "• <b>+200 T</b> на баланс\n"
+        "• <b>+10000 Р</b> на баланс\n"
         "• <b>+10 Trust Score</b>\n\n"
         "⚠️ Код действителен до конца суток (UTC).",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
@@ -241,7 +241,7 @@ async def cmd_help(msg: Message):
         "3️⃣ Введите <code>.econ verify ВАШ_КОД</code>\n\n"
         "✅ После верификации вы получите:\n"
         "• Титул <b>«Гражданин»</b>\n"
-        "• <b>+200 T</b> на баланс\n"
+        "• <b>+10000 Р</b> на баланс\n"
         "• <b>+10 Trust Score</b>\n\n"
         "⚠️ Код действителен до конца суток (UTC).",
         parse_mode="HTML"
